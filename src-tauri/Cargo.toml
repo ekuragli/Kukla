@@ -63,3 +63,7 @@ quick-xml = "0.37"
 # Bulut YZ sağlayıcıları: OpenAI uyumlu SSE akışı
 futures-util = "0.3"
 
+# Testler: opencode HTTP API'sinin taklidi (oturum sürekliliği regresyonları)
+[dev-dependencies]
+wiremock = "0.6"
+
