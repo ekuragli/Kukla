@@ -1,6 +1,6 @@
 [package]
 name = "kukla"
-version = "0.2.0"
+version = "0.2.1"
 description = "Kukla - AI-powered legal precedent search for attorneys"
 authors = ["Erhan"]
 license = "MIT"
