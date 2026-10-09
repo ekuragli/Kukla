@@ -324,14 +324,30 @@ impl OpencodeClient {
 
     /// Var olan bir oturumda istek çalıştırır. Üretim sürerken her yoklamada
     /// `on_progress` ile kısmi metin, iptal durumunda `is_cancelled` dinlenir.
+    ///
+    /// Sohbet sürekliliğinde kritik: prompt gönderilmeden **önce** oturumdaki
+    /// asistan mesajlarının kimlikleri toplanır. Yoklama döngüsü yalnızca bu
+    /// kadar mesajdan SONRA gelen yanıtı kabul eder; aksi halde önceki turun
+    /// tamamlanmış yanıtı anında "yeni yanıt" olarak döner ve sohbet her
+    /// seferinde aynı cevabı verir.
     pub async fn prompt_on_session(
         &self,
         session_id: &str,
         prompt: &str,
         hooks: &PromptHooks<'_>,
     ) -> Result<ChatReply, String> {
+        let baseline = self.session_baseline(session_id).await;
         self.send_prompt(session_id, prompt).await?;
-        self.wait_for_reply_with(session_id, hooks).await
+        self.wait_for_reply_with(session_id, hooks, &baseline).await
+    }
+
+    /// Oturumdaki mevcut asistan mesajlarının kimliklerini ve en yeni zaman
+    /// damgasını toplar (prompt göndermeden önce çağrılır).
+    async fn session_baseline(&self, session_id: &str) -> SessionBaseline {
+        let Ok(messages) = self.messages(session_id).await else {
+            return SessionBaseline::default();
+        };
+        SessionBaseline::from_messages(&messages)
     }
 
     /// Kullanıcı iptalinde opencode tarafında üretimi durdurur.
@@ -344,6 +360,7 @@ impl OpencodeClient {
         &self,
         session_id: &str,
         hooks: &PromptHooks<'_>,
+        baseline: &SessionBaseline,
     ) -> Result<ChatReply, String> {
         let deadline = Instant::now() + REPLY_TIMEOUT;
         let mut last_emitted = String::new();
@@ -360,14 +377,14 @@ impl OpencodeClient {
 
             let messages = self.messages(session_id).await?;
             if let Some(on_progress) = hooks.on_progress {
-                if let Some(partial) = partial_assistant_text(&messages) {
+                if let Some(partial) = partial_assistant_text(&messages, baseline) {
                     if !partial.is_empty() && partial != last_emitted {
                         last_emitted.clone_from(&partial);
                         on_progress(session_id, &partial);
                     }
                 }
             }
-            if let Some(reply) = latest_completed_assistant(&messages) {
+            if let Some(reply) = latest_completed_assistant(&messages, baseline) {
                 return reply;
             }
 
@@ -484,11 +501,64 @@ impl PromptHooks<'_> {
     };
 }
 
+/// Bir prompt öncesinde oturumda bulunan asistan mesajlarının izi.
+///
+/// Yoklama döngüsü bu izdeki mesajları "eski" sayar; yalnızca sonradan gelen
+/// asistan mesajları yeni yanıt olarak kabul edilir.
+#[derive(Debug, Default)]
+pub struct SessionBaseline {
+    ids: std::collections::HashSet<String>,
+    latest_created: i64,
+}
+
+impl SessionBaseline {
+    /// Mesaj listesinden asistan mesajlarının kimliklerini ve en yeni zaman
+    /// damgasını toplar.
+    pub fn from_messages(messages: &[serde_json::Value]) -> Self {
+        let mut ids = std::collections::HashSet::new();
+        let mut latest_created = 0i64;
+        for message in messages {
+            if let Some(created) = message.pointer("/time/created").and_then(|v| v.as_i64()) {
+                latest_created = latest_created.max(created);
+            }
+            if message.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+                continue;
+            }
+            if let Some(id) = message.get("id").and_then(|v| v.as_str()) {
+                ids.insert(id.to_string());
+            }
+        }
+        Self { ids, latest_created }
+    }
+
+    /// Mesaj bu baseline'dan SONRA mı geldi? (kimlik tercihli, zaman yedeği)
+    fn is_new_assistant(&self, message: &serde_json::Value) -> bool {
+        if message.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+            return false;
+        }
+        match message.get("id").and_then(|v| v.as_str()) {
+            Some(id) => !self.ids.contains(id),
+            // Kimlik yoksa zaman damgasıyla karşılaştır.
+            None => message
+                .pointer("/time/created")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                > self.latest_created,
+        }
+    }
+}
+
 /// Üretim sürerkenki (henüz tamamlanmamış) asistan metnini seçer.
-fn partial_assistant_text(messages: &[serde_json::Value]) -> Option<String> {
+///
+/// Baseline'dan önceki mesajlar atlanır; aksi halde önceki turun yanıtı
+/// "üretiliyor" önizlemesi olarak gösterilir.
+fn partial_assistant_text(
+    messages: &[serde_json::Value],
+    baseline: &SessionBaseline,
+) -> Option<String> {
     let mut chosen: Option<&serde_json::Value> = None;
     for message in messages {
-        if message.get("type").and_then(|v| v.as_str()) == Some("assistant") {
+        if baseline.is_new_assistant(message) {
             chosen = Some(message);
         }
     }
@@ -501,10 +571,16 @@ fn partial_assistant_text(messages: &[serde_json::Value]) -> Option<String> {
 }
 
 /// Tamamlanmış son asistan mesajını seçer; hata varsa Err döner.
-fn latest_completed_assistant(messages: &[serde_json::Value]) -> Option<Result<ChatReply, String>> {
+///
+/// Yalnızca baseline'dan sonra gelen ve tamamlanmış mesajlar kabul edilir —
+/// var olan oturumda önceki yanıtın anında dönmesini engeller.
+fn latest_completed_assistant(
+    messages: &[serde_json::Value],
+    baseline: &SessionBaseline,
+) -> Option<Result<ChatReply, String>> {
     let mut chosen: Option<&serde_json::Value> = None;
     for message in messages {
-        if message.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+        if !baseline.is_new_assistant(message) {
             continue;
         }
         if !is_completed(message) {
@@ -603,9 +679,141 @@ fn port_of(base_url: &str) -> String {
 
 fn first_line(body: &str) -> String {
     body.lines()
-        .find(|l| !l.trim().is_empty())
+        .find(|line| !line.trim().is_empty())
         .unwrap_or("boş yanıt")
         .chars()
         .take(200)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{latest_completed_assistant, partial_assistant_text, SessionBaseline};
+
+    fn assistant(id: &str, text: &str, completed: bool, created: i64) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "type": "assistant",
+            "content": [{ "type": "text", "text": text }],
+            "time": if completed {
+                serde_json::json!({ "created": created, "completed": created + 1000 })
+            } else {
+                serde_json::json!({ "created": created })
+            }
+        })
+    }
+
+    fn user(text: &str, created: i64) -> serde_json::Value {
+        serde_json::json!({
+            "id": format!("user_{}", created),
+            "type": "user",
+            "content": [{ "type": "text", "text": text }],
+            "time": { "created": created }
+        })
+    }
+
+    /// Var olan oturumda önceki tamamlanmış yanıt "yeni yanıt" sayılmamalı
+    /// (sohbetin her seferinde aynı cevabı döndürmesinin kök nedeni buydu).
+    #[test]
+    fn previous_completed_reply_is_not_returned_again() {
+        let messages = vec![
+            user("Birinci soru", 1),
+            assistant("msg_1", "ILK YANIT", true, 2),
+        ];
+        let baseline = SessionBaseline::from_messages(&messages);
+
+        assert!(
+            latest_completed_assistant(&messages, &baseline).is_none(),
+            "baseline'daki tamamlanmis mesaj yeni yanit olarak donmemeli"
+        );
+        assert!(
+            partial_assistant_text(&messages, &baseline).is_none(),
+            "baseline'daki mesaj uretim onizlemesi olarak gosterilmemeli"
+        );
+    }
+
+    /// Yeni tamamlanmiş yanıt kabul edilir ve doğru metni taşır.
+    #[test]
+    fn new_completed_reply_is_returned() {
+        let messages = vec![
+            user("Birinci soru", 1),
+            assistant("msg_1", "ILK YANIT", true, 2),
+            user("Ikinci soru", 3),
+            assistant("msg_2", "IKINCI YANIT", true, 4),
+        ];
+        let baseline = SessionBaseline::from_messages(&messages[..2]);
+
+        let reply = latest_completed_assistant(&messages, &baseline)
+            .expect("yeni tamamlanmis yanit bulunmali")
+            .expect("yanit hatasiz olmali");
+        assert_eq!(reply.text, "IKINCI YANIT");
+    }
+
+    /// Üretim süren (tamamlanmamış) yeni mesaj önizleme olarak akar.
+    #[test]
+    fn generating_new_message_streams_as_preview() {
+        let messages = vec![
+            assistant("msg_1", "ILK YANIT", true, 2),
+            assistant("msg_2", "yarim", false, 3),
+        ];
+        let baseline = SessionBaseline::from_messages(&messages[..1]);
+
+        assert_eq!(
+            partial_assistant_text(&messages, &baseline).as_deref(),
+            Some("yarim")
+        );
+        assert!(latest_completed_assistant(&messages, &baseline).is_none());
+    }
+
+    /// Kimlik alanı olmayan mesajlarda zaman damgasi yedeği devreye girer.
+    #[test]
+    fn falls_back_to_timestamp_when_id_missing() {
+        let old = serde_json::json!({
+            "type": "assistant",
+            "content": [{ "type": "text", "text": "ESKI" }],
+            "time": { "created": 100, "completed": 200 }
+        });
+        let new = serde_json::json!({
+            "type": "assistant",
+            "content": [{ "type": "text", "text": "YENI" }],
+            "time": { "created": 300, "completed": 400 }
+        });
+        let baseline = SessionBaseline::from_messages(&[old.clone()]);
+
+        assert!(!baseline.is_new_assistant(&old));
+        assert!(baseline.is_new_assistant(&new));
+
+        let messages = vec![old, new];
+        let reply = latest_completed_assistant(&messages, &baseline)
+            .expect("yeni yanit bulunmali")
+            .expect("hatasiz");
+        assert_eq!(reply.text, "YENI");
+    }
+
+    /// Yeni yanıttaki hata Err olarak yüzeyine çıkar.
+    #[test]
+    fn error_in_new_reply_surfaces() {
+        let failed = serde_json::json!({
+            "id": "msg_2",
+            "type": "assistant",
+            "content": [],
+            "error": { "message": "model kapali" },
+            "time": { "created": 3, "completed": 4 }
+        });
+        let baseline = SessionBaseline::from_messages(&[assistant("msg_1", "ilk", true, 2)]);
+
+        let result = latest_completed_assistant(&[failed], &baseline)
+            .expect("hata mesaji yakalanmali");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("model kapali"));
+    }
+
+    /// Kullanıcı mesajları asistan yanıtı sayılmaz.
+    #[test]
+    fn user_messages_are_never_treated_as_replies() {
+        let messages = vec![user("sadece kullanici", 1)];
+        let baseline = SessionBaseline::default();
+        assert!(!baseline.is_new_assistant(&messages[0]));
+        assert!(latest_completed_assistant(&messages, &baseline).is_none());
+    }
 }

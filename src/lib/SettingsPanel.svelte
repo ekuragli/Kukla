@@ -132,6 +132,9 @@
 
   // Tavily anahtarını kaydeder veya siler (clear=true).
   async function handleSaveWebKey(clear = false) {
+    if (clear && !window.confirm('Web arama anahtarı silinecek ve İnternet modu çalışmayacak. Emin misiniz?')) {
+      return;
+    }
     savingWebKey = true;
     webKeyMessage = '';
     webKeyError = false;
@@ -186,6 +189,9 @@
   }
 
   async function handleSaveCloudKey(clear = false) {
+    if (clear && !window.confirm('Bulut sağlayıcı anahtarı silinecek ve sohbet yerel opencode sunucusuna dönecek. Emin misiniz?')) {
+      return;
+    }
     savingCloud = true;
     cloudMessage = '';
     cloudError = false;
@@ -679,7 +685,7 @@
         disabled={savingWebKey}
         autocomplete="off"
       />
-      <button type="button" onclick={handleSaveWebKey} disabled={savingWebKey}>
+      <button type="button" onclick={() => handleSaveWebKey()} disabled={savingWebKey}>
         {savingWebKey ? 'Kaydediliyor...' : 'Kaydet'}
       </button>
       {#if webStatus?.has_web_search_key}
@@ -766,7 +772,7 @@
           disabled={savingCloud}
           autocomplete="off"
         />
-        <button type="button" onclick={handleSaveCloudKey} disabled={savingCloud}>
+        <button type="button" onclick={() => handleSaveCloudKey()} disabled={savingCloud}>
           Kaydet
         </button>
         {#if cloudStatus?.has_key}
