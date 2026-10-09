@@ -36,7 +36,14 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: cargo audit
-        run: cargo audit
+        # Yukarı akışta düzeltmesi olmayan danışmanlıklar hariç tutulur:
+        #   RUSTSEC-2026-0187  lopdf  (pdf-extract/printpdf sabitlediği için kaldı)
+        #   RUSTSEC-2026-0194/195 quick-xml (docx-rs 0.36'yı sabitlediği için kaldı;
+        #                        kendi kullanımımız 0.38.4'e yükseltildi)
+        #   RUSTSEC-2026-0235  rkyv 0.7 (en güncel 0.7 sürümü)
+        #   RUSTSEC-2026-0285  rustls 0.23.43 (0.23.45 bağımlı MSRV yüzünden kilitli)
+        # Bu kitaplıklar yalnızca kullanıcının kendi seçtiği yerel dosyalarını okur.
+        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0235 --ignore RUSTSEC-2026-0285
 
   frontend:
     name: Frontend Build

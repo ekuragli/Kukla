@@ -55,6 +55,8 @@ jobs:
 
       - name: Verify signing key
         shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
             Write-Error "TAURI_SIGNING_PRIVATE_KEY secret is required. Add the private key from src-tauri/keys/kukla.key to repository secrets."

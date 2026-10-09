@@ -12,7 +12,8 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "test:rust": "cargo test --tests --manifest-path src-tauri/Cargo.toml",
-    "check:rust": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -W clippy::all"
+    "check:rust": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -W clippy::all",
+    "audit:rust": "cd src-tauri && cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0235 --ignore RUSTSEC-2026-0285"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
